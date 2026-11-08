@@ -9,9 +9,10 @@ from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
 
 from clone import register
-from config import API_HASH, APP_ID, BOTTOKEN, LOGGER, OWNER, WORKERS
-from database import (check_database, clone_id, clones, delete_clone, get_clone, get_clones, put,
-                      save_clone, set_database, settings, user_count)
+from config import API_HASH, APP_ID, BOTTOKEN, LOGGER, MONGODB, OWNER, WORKERS
+from database import (DEFAULT_COLLECTION, check_database, clone_id, clones, connect_location, default_database,
+                      delete_clone, get_clone, get_clones, location, mask_url, put, save_clone, set_location,
+                      settings, user_count)
 
 run = asyncio.to_thread
 MANAGER = None  # the manager's Bot, created by create_manager()
@@ -33,18 +34,24 @@ PROMPTS = {
     "admins": ("Admins",
                "Send the <b>admin user IDs</b> separated by spaces. They replace the current list."),
     "database": ("Database",
-                 "Send the <b>name of an existing database</b> to move this clone to "
-                 "(it must already contain a users collection)."),
+                 "Send where this clone keeps its data:\n"
+                 "<code>MONGODB_URL DATABASE COLLECTION</code>\n\n"
+                 "Example: <code>mongodb+srv://user:pass@cluster.mongodb.net/ clonex users</code>\n\n"
+                 "• The collection holds the users and is created if it does not exist.\n"
+                 "• Leave out the URL to keep the current one, or the collection to keep its name.\n"
+                 "• Send <code>default</code> to go back to the default MongoDB and a database named after the bot.\n"
+                 "• The clone's settings move with it. Existing users are not copied.\n\n"
+                 "Your message is deleted afterwards because it may contain a password."),
 }
 # Which saved settings each editable field covers (used to roll back a bad edit).
 KEYS = {"files": ("files",), "forcesub": ("forcesub",), "admins": ("admins",),
         "shortener": ("shortsite", "shortapi")}
 # The delete confirmations: action -> (text, button label, next action)
 DELETE_STEPS = {
-    "del": ("<b>First confirmation</b>\n\nDelete this clone and permanently erase its MongoDB database?",
+    "del": ("<b>First confirmation</b>\n\nDelete this clone and permanently erase its users and settings from MongoDB?",
             "⚠️ Yes, Continue", "del2"),
-    "del2": ("<b>FINAL CONFIRMATION</b>\n\nThis cannot be undone. Permanently delete the clone, all users, "
-             "and its MongoDB database?", "🛑 YES, DELETE PERMANENTLY", "del3"),
+    "del2": ("<b>FINAL CONFIRMATION</b>\n\nThis cannot be undone. Permanently delete the clone, all its users, "
+             "and its settings?", "🛑 YES, DELETE PERMANENTLY", "del3"),
 }
 
 
@@ -53,7 +60,9 @@ class Bot:
     """A Pyrogram client plus start / stop / restart. Clones (store=True) also load their settings."""
 
     def __init__(self, session, token, bot_id, register_handlers=None, store=True):
-        self.args = dict(name=session, api_id=APP_ID, api_hash=API_HASH, bot_token=token, workers=WORKERS)
+        # in_memory: no .session files, so a stale login from an old token can never block a new one.
+        self.args = dict(name=session, api_id=APP_ID, api_hash=API_HASH, bot_token=token,
+                         workers=WORKERS, in_memory=True)
         self.client = Client(**self.args)
         self.bot_id = bot_id
         self.register_handlers = register_handlers
@@ -95,9 +104,19 @@ class Bot:
             if self.register_handlers and not client.dispatcher.groups:
                 self.register_handlers(client)
             LOGGER.info("Started @%s (%s)", self.username, self.bot_id)
+            if self.store:
+                await self.announce()
         except Exception:
             await self.stop()
             raise
+
+    async def announce(self):
+        """Tell the clone's admins it is online. Only works for admins who have started the bot."""
+        for admin_id in self.client.cfg["admins"]:
+            try:
+                await self.client.send_message(admin_id, f"🟢 <b>Bot Online</b>\n\n{self.title}")
+            except Exception as e:
+                LOGGER.info("Could not tell admin %s that @%s is online: %s", admin_id, self.username, type(e).__name__)
 
     async def stop(self):
         try:
@@ -177,14 +196,17 @@ async def clone_list():
 async def panel(item):
     """The settings screen of one clone as (text, buttons)."""
     bot_id = item["_id"]
-    cfg, users = await asyncio.gather(run(settings, bot_id), run(user_count, bot_id))
+    cfg, users, (url, database, collection) = await asyncio.gather(
+        run(settings, bot_id), run(user_count, bot_id), run(location, bot_id))
     text = (
         f"<b>Clone Settings</b>\n\n"
         f"Bot: <b>{escape(label(item))}</b>\n"
         f"Status: {'🟢 Running' if running(bot_id) else '🔴 Stopped'}\n"
         f"Users: <code>{users}</code>\n"
-        f"Database: <code>{item.get('database', bot_id)}</code>\n"
         f"Token: <code>{item.get('token', '')}</code>\n\n"
+        f"MongoDB: <code>{'Default' if url == MONGODB else escape(mask_url(url))}</code>\n"
+        f"Database: <code>{database}</code>\n"
+        f"Collection: <code>{collection}</code>\n\n"
         f"Files Channel: <code>{cfg['files']}</code>\n"
         f"ForceSub: <code>{cfg['forcesub'] or 'Off'}</code>\n"
         f"Shortener: <code>{cfg['shortsite'] or 'Off'}</code> / <code>{cfg['shortapi'] or 'Not set'}</code>\n"
@@ -232,8 +254,17 @@ async def clone_command(client, message):
     username = me["username"]
     bot_id = clone_id(username)  # also the name of the clone's database
     name = " ".join(filter(None, [me.get("first_name"), me.get("last_name")])) or username
-    if bot_id in workers or await run(get_clone, bot_id):
-        return await message.reply(f"@{username} is already registered.")
+    existing = await run(get_clone, bot_id)
+    stale = workers.get(bot_id)
+    if stale and not existing:  # the database was wiped while this bot was still running in memory
+        workers.pop(bot_id, None)
+        await stale.stop()
+    if existing:
+        if adopt:
+            return await message.reply(
+                f"@{username} is already registered, so a database cannot be adopted.\n"
+                "Send <code>/clone BOT_TOKEN</code> alone to update its token.")
+        return await update_token(message, bot_id, token, username, name, existing)
 
     # Save before starting, so the bot starts with its (possibly adopted) settings already in place.
     worker = Bot(f"clone_{bot_id}", token, bot_id, register)
@@ -250,10 +281,34 @@ async def clone_command(client, message):
     workers[bot_id] = worker
     item = await run(get_clone, bot_id)
     text = f"✅ Clone started: <b>{escape(name)}</b> (@{username})\nDatabase: <code>{item['database']}</code>"
-    if adopt:
+    if adopted:
         text += f"\nAdopted {adopted} users"
     await message.reply(text)
     await notify(f"🤖 <b>Clone Started</b>\n\n{worker.title}")
+
+
+async def update_token(message, bot_id, token, username, name, existing):
+    """/clone for a bot that is already registered: switch it to the new token and start it again."""
+    old = workers.get(bot_id)
+    if old and existing["token"] == token and running(bot_id):
+        return await message.reply(f"@{username} is already registered and running.")
+
+    if old:
+        await old.stop()
+    # Keeps the clone's database and settings; only the token (and name) change.
+    await run(save_clone, bot_id, token, username, name, existing["database"])
+    # Registered even if it fails to start, so the watchdog keeps retrying with the NEW token.
+    worker = workers[bot_id] = Bot(f"clone_{bot_id}", token, bot_id, register)
+    try:
+        await worker.start()
+    except Exception as e:
+        LOGGER.exception("Clone %s did not start with its new token", bot_id)
+        return await message.reply(
+            f"The new token was saved, but the bot could not start.\n<code>{escape(str(e))}</code>\n\n"
+            "It will be retried automatically.")
+
+    await message.reply(f"✅ Token updated, clone started: <b>{escape(name)}</b> (@{username})")
+    await notify(f"🔄 <b>Clone Token Updated</b>\n\n{worker.title}")
 
 
 async def restart_command(client, message):
@@ -315,8 +370,27 @@ def apply_setting(bot_id, field, text):
         put(bot_id, shortsite=re.sub(r"^https?://", "", parts[0]).rstrip("/"), shortapi=parts[1])
 
     else:  # database
-        check_database(text)
-        set_database(bot_id, text)
+        url, database, collection = parse_location(bot_id, text)
+        connect_location(url, database, collection)  # checks the connection, creates the collection if missing
+        set_location(bot_id, url, database, collection)
+
+
+def parse_location(bot_id, text):
+    """"[mongodb-url] [database] [collection]" or "default" -> (url, database, collection).
+    Anything left out stays as it is now."""
+    url, database, collection = location(bot_id)
+    parts = text.split()
+    if len(parts) == 1 and parts[0].lower() == "default":
+        return MONGODB, default_database(bot_id), DEFAULT_COLLECTION
+    if parts and parts[0].lower().startswith("mongodb"):
+        url = parts.pop(0)
+    if len(parts) > 2:
+        raise ValueError("Send: MONGODB_URL DATABASE COLLECTION")
+    if parts:
+        database = parts[0]
+    if len(parts) == 2:
+        collection = parts[1]
+    return url, database, collection
 
 
 async def edit_input(client, message):
@@ -327,11 +401,16 @@ async def edit_input(client, message):
     bot_id, field = pending[user_id]
     worker = workers.get(bot_id)
     text = message.text.strip()
-    old_settings = old_database = None
+    old_settings = old_location = None
+
+    if field == "database":  # the message may contain a MongoDB password, so don't leave it in the chat
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
     try:
-        old_settings, item = await asyncio.gather(run(settings, bot_id), run(get_clone, bot_id))
-        old_database = item["database"]
+        old_settings, old_location = await asyncio.gather(run(settings, bot_id), run(location, bot_id))
         if field in ("files", "forcesub") and worker and number(text):
             await worker.client.get_chat(number(text))  # fail early if the bot can't see the channel
         await run(apply_setting, bot_id, field, text)
@@ -341,7 +420,7 @@ async def edit_input(client, message):
         if old_settings is not None:  # roll back, so a bad value never leaves the clone half-configured
             try:
                 if field == "database":
-                    await run(set_database, bot_id, old_database)
+                    await run(set_location, bot_id, *old_location)
                 else:
                     await run(put, bot_id, **{key: old_settings[key] for key in KEYS[field]})
                 if worker:

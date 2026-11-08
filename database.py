@@ -4,8 +4,26 @@ from pymongo import MongoClient
 
 from config import DBNAME, DEFAULTS, LOGGER, MONGODB
 
+# Each clone keeps its data in a MongoDB "location": URL + database + collection.
+# By default that is the manager's MongoDB, a database named after the bot, and a "users" collection.
+# The owner can point any clone somewhere else from the manager. The clone's settings ("config"
+# collection) live in the same database as its users.
+DEFAULT_COLLECTION = "users"
+
 mongo = MongoClient(MONGODB, serverSelectionTimeoutMS=10000)
-clones = mongo[DBNAME]["clones"]
+clones = mongo[DBNAME]["clones"]  # one document per clone: token, name, and where its data lives
+_clients = {MONGODB: mongo}       # one MongoClient per MongoDB URL
+
+
+def client_for(url):
+    if url not in _clients:
+        _clients[url] = MongoClient(url, serverSelectionTimeoutMS=10000)
+    return _clients[url]
+
+
+def mask_url(url):
+    """Hide the password of a MongoDB URL so it can be shown in chat."""
+    return re.sub(r"(://[^:/@]+:)[^@]+@", r"\1***@", url)
 
 
 # ───────────────────────── clones ─────────────────────────
@@ -22,30 +40,66 @@ def get_clones():
     return list(clones.find())
 
 
+def default_database(bot_id):
+    return bot_id if bot_id != DBNAME else f"clone_{bot_id}"
+
+
+# ───────────────────────── where a clone's data lives ─────────────────────────
+def location(bot_id):
+    """(MongoDB URL, database name, users collection name) of a clone."""
+    item = clones.find_one({"_id": bot_id}, {"mongo_url": 1, "database": 1, "collection": 1}) or {}
+    return (item.get("mongo_url") or MONGODB,
+            item.get("database") or default_database(bot_id),
+            item.get("collection") or DEFAULT_COLLECTION)
+
+
+def uses_default_cluster(bot_id):
+    return location(bot_id)[0] == MONGODB
+
+
 def clone_db(bot_id):
-    """The database that belongs to this clone."""
-    item = clones.find_one({"_id": bot_id}, {"database": 1}) or {}
-    return mongo[item.get("database") or bot_id]
+    url, database, _ = location(bot_id)
+    return client_for(url)[database]
+
+
+def users_collection(bot_id):
+    url, database, collection = location(bot_id)
+    return client_for(url)[database][collection]
+
+
+def validate_location(url, database, collection):
+    """Raise ValueError with a readable message if a MongoDB location cannot be used."""
+    if not re.fullmatch(r"mongodb(\+srv)?://\S+", url or ""):
+        raise ValueError("The MongoDB URL must start with mongodb:// or mongodb+srv://")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,38}", database):
+        raise ValueError("Database name: 1-38 letters, numbers, - or _ only.")
+    if database in ("admin", "local", "config") or (url == MONGODB and database == DBNAME):
+        raise ValueError("That database cannot be used.")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", collection) or collection.startswith("system.") or collection == "config":
+        raise ValueError("Collection name: letters, numbers, . - or _ only (not 'config').")
 
 
 def check_database(name):
-    """Make sure an existing database can be given to a clone. Returns its user count."""
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,38}", name):
-        raise ValueError("Invalid database name.")
-    if name in (DBNAME, "admin", "local", "config"):
-        raise ValueError("That database cannot be used.")
-    count = mongo[name]["users"].estimated_document_count()
-    if not count:
-        raise ValueError(f"Database '{name}' has no users - check the name.")
-    return count
+    """Validate a database name for /clone TOKEN NAME. Returns how many users it already holds."""
+    validate_location(MONGODB, name, DEFAULT_COLLECTION)
+    return mongo[name][DEFAULT_COLLECTION].estimated_document_count()
 
 
-def save_clone(bot_id, token, username, display_name, database=None):
-    """Register a clone (or update it). Its database is the bot username unless one is adopted."""
-    old = clones.find_one({"_id": bot_id}) or {}
-    database = database or old.get("database") or (bot_id if bot_id != DBNAME else f"clone_{bot_id}")
-    config = mongo[database]["config"]
+def connect_location(url, database, collection):
+    """Prove a MongoDB location works, and create the collection if it does not exist yet."""
+    validate_location(url, database, collection)
+    client = client_for(url)
+    client.admin.command("ping")  # raises if the server is unreachable or the login is wrong
+    db = client[database]
+    if collection not in db.list_collection_names():
+        db.create_collection(collection)
+    return db[collection].estimated_document_count()
 
+
+# ───────────────────────── saving and deleting clones ─────────────────────────
+def fill_settings(bot_id, fallback):
+    """Make sure the clone's database has settings: keep what is there, fill the rest from `fallback`."""
+    config = clone_db(bot_id)["config"]
     current = config.find_one({"_id": "settings"}) or {}
     current.pop("_id", None)
 
@@ -55,18 +109,38 @@ def save_clone(bot_id, token, username, display_name, database=None):
         current.setdefault("shortsite", legacy["shortener"])
         current.setdefault("shortapi", legacy["shortener_api"])
 
-    for key, value in DEFAULTS.items():
+    for key, value in fallback.items():
         current.setdefault(key, value)
     config.replace_one({"_id": "settings"}, current, upsert=True)
 
+
+def save_clone(bot_id, token, username, display_name, database=None):
+    """Register a clone (or update it). Its data location is kept when only the token changes."""
+    old = clones.find_one({"_id": bot_id}) or {}
     clones.replace_one({"_id": bot_id}, {
+        **old,
         "_id": bot_id,
         "token": token,
         "username": username,
         "display_name": display_name,
-        "database": database,
+        "database": database or old.get("database") or default_database(bot_id),
     }, upsert=True)
+    fill_settings(bot_id, DEFAULTS)
     set_info(bot_id, username, display_name)
+
+
+def set_location(bot_id, url, database, collection):
+    """Point a clone at another MongoDB location. Its settings move with it, unless that
+    location already has settings of its own (then those are used)."""
+    carried = settings(bot_id)
+    item = clones.find_one({"_id": bot_id})
+    clones.update_one({"_id": bot_id}, {"$set": {
+        "mongo_url": None if url == MONGODB else url,  # the default URL is stored as "nothing"
+        "database": database,
+        "collection": collection,
+    }})
+    fill_settings(bot_id, carried)
+    set_info(bot_id, item["username"], item["display_name"])
 
 
 def set_info(bot_id, username, display_name):
@@ -76,17 +150,20 @@ def set_info(bot_id, username, display_name):
         {"_id": "info"}, {"$set": {"username": username, "name": display_name}}, upsert=True)
 
 
-def set_database(bot_id, name):
-    """Move a clone to another (existing) database."""
-    item = clones.find_one({"_id": bot_id})
-    save_clone(bot_id, item["token"], item["username"], item["display_name"], name)
-
-
 def delete_clone(bot_id):
-    """Remove the clone and permanently drop its database."""
-    item = clones.find_one({"_id": bot_id}, {"database": 1})
+    """Remove a clone. The default database is dropped. A database or collection the owner chose
+    is never dropped as a whole; only this clone's users and settings are removed from it."""
+    item = clones.find_one({"_id": bot_id}) or {}
+    url, database, collection = location(bot_id)
+    default = not item.get("mongo_url") and database == default_database(bot_id) and collection == DEFAULT_COLLECTION
     clones.delete_one({"_id": bot_id})
-    mongo.drop_database((item or {}).get("database") or bot_id)
+
+    client = client_for(url)
+    if default:
+        client.drop_database(database)
+    else:
+        client[database][collection].drop()
+        client[database]["config"].delete_many({"_id": {"$in": ["settings", "info"]}})
 
 
 # ───────────────────────── settings ─────────────────────────
@@ -107,19 +184,19 @@ def put(bot_id, **values):
 
 # ───────────────────────── users ─────────────────────────
 def add_user(bot_id, user_id):
-    clone_db(bot_id)["users"].update_one({"_id": user_id}, {"$setOnInsert": {"_id": user_id}}, upsert=True)
+    users_collection(bot_id).update_one({"_id": user_id}, {"$setOnInsert": {"_id": user_id}}, upsert=True)
 
 
 def del_user(bot_id, user_id):
-    clone_db(bot_id)["users"].delete_one({"_id": user_id})
+    users_collection(bot_id).delete_one({"_id": user_id})
 
 
 def all_users(bot_id):
-    return [user["_id"] for user in clone_db(bot_id)["users"].find({}, {"_id": 1}, batch_size=500)]
+    return [user["_id"] for user in users_collection(bot_id).find({}, {"_id": 1}, batch_size=500)]
 
 
 def user_count(bot_id):
-    return clone_db(bot_id)["users"].count_documents({})
+    return users_collection(bot_id).count_documents({})
 
 
 # ───────────────────────── storage stats ─────────────────────────
@@ -139,8 +216,9 @@ def bot_storage(bot_id):
 
 
 def cluster_storage():
-    total = storage(mongo[DBNAME])
-    for item in clones.find({}, {"database": 1}):
-        if item.get("database"):
-            total += storage(mongo[item["database"]])
-    return total
+    """Storage used on the manager's MongoDB (the manager plus every clone that uses it)."""
+    names = {DBNAME}
+    for item in clones.find({}, {"database": 1, "mongo_url": 1}):
+        if item.get("database") and not item.get("mongo_url"):
+            names.add(item["database"])
+    return sum(storage(mongo[name]) for name in names)

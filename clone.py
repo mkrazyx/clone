@@ -11,7 +11,8 @@ from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
 
 from config import ADMIN_USERNAME, FORCE_SUB_MESSAGE, LOGGER, MONGO_LIMIT_MB, START_MESSAGE
-from database import add_user, all_users, bot_storage, cluster_storage, del_user, put, user_count
+from database import (add_user, all_users, bot_storage, cluster_storage, del_user, put, user_count,
+                      uses_default_cluster)
 
 run = asyncio.to_thread
 
@@ -364,19 +365,21 @@ async def stats_command(client, message):
     if not message.from_user or not is_admin(client, message.from_user.id):
         return
     limit = MONGO_LIMIT_MB * 1024 * 1024
-    mine, total, users = await asyncio.gather(
-        run(bot_storage, client.bot_id), run(cluster_storage), run(user_count, client.bot_id))
+    mine, total, users, shared = await asyncio.gather(
+        run(bot_storage, client.bot_id), run(cluster_storage), run(user_count, client.bot_id),
+        run(uses_default_cluster, client.bot_id))
 
     def size(n):
         return f"{n / 1024 / 1024:.2f} MB" if n >= 1024 * 1024 else f"{n / 1024:.2f} KB"
 
-    await message.reply(
-        f"<b>Bot Stats</b>\n\n"
-        f"Users: <code>{users}</code>\n\n"
-        f"This bot: <code>{size(mine)}</code>\n"
-        f"Other bots: <code>{size(max(0, total - mine))}</code>\n"
-        f"MongoDB: <code>{size(total)} / {MONGO_LIMIT_MB} MB</code>\n"
-        f"Left: <code>{size(max(0, limit - total))}</code>")
+    text = f"<b>Bot Stats</b>\n\nUsers: <code>{users}</code>\n\nThis bot: <code>{size(mine)}</code>\n"
+    if shared:
+        text += (f"Other bots: <code>{size(max(0, total - mine))}</code>\n"
+                 f"MongoDB: <code>{size(total)} / {MONGO_LIMIT_MB} MB</code>\n"
+                 f"Left: <code>{size(max(0, limit - total))}</code>")
+    else:
+        text += "\nThis bot uses its own MongoDB, so the shared MongoDB limit does not apply."
+    await message.reply(text)
 
 
 # ═══════════════════════════ registration ═══════════════════════════

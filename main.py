@@ -13,7 +13,7 @@ from manager import Bot, create_manager, label, notify, running, workers
 
 WATCHDOG_INTERVAL = 60  # seconds between health checks
 LIVENESS_TIMEOUT = 30   # seconds to wait for get_me()
-MAX_ALERTS = 3          # stop alerting the owner after this many failed restarts in a row
+MAX_RETRIES = 2         # restart attempts per bot, then it is left alone (use Restart in /mybots after fixing it)
 MAX_BACKOFF = 3600      # never wait more than 1 hour between restart attempts
 
 
@@ -47,14 +47,24 @@ async def watchdog():
     while True:
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
+        # The database is the source of truth: stop bots that were deleted from it (e.g. it was wiped).
+        try:
+            known = {item["_id"] for item in await asyncio.to_thread(get_clones)}
+            for bot_id in [b for b in workers if b not in known]:
+                LOGGER.warning("Clone %s is no longer in the database; stopping it", bot_id)
+                await workers.pop(bot_id).stop()
+                state.pop(bot_id, None)
+        except Exception:
+            LOGGER.exception("Could not check the clone list")
+
         for key, bot in [("manager", manager.MANAGER), *workers.items()]:
             if await alive(bot.client):
                 state[key] = [0, 0.0]
                 continue
 
             fails, next_try = state.setdefault(key, [0, 0.0])
-            if time.monotonic() < next_try:
-                continue
+            if fails >= MAX_RETRIES or time.monotonic() < next_try:
+                continue  # gave up on this bot, or it is not time for the next try yet
 
             LOGGER.warning("%s is not responding; restarting (failed attempts so far: %s)", key, fails)
             try:
@@ -66,10 +76,15 @@ async def watchdog():
                 wait = min(WATCHDOG_INTERVAL * 2 ** fails, MAX_BACKOFF)
                 state[key] = [fails, time.monotonic() + wait]
                 LOGGER.exception("%s restart failed", key)
-                if fails <= MAX_ALERTS:
+                error = escape(str(e))
+                if fails < MAX_RETRIES:
                     await notify(
-                        f"❌ <b>Restart Failed</b>\n\n{bot.title}\nAttempt: {fails}\n"
-                        f"Next try in: {wait}s\nError: <code>{escape(str(e))}</code>")
+                        f"❌ <b>Restart Failed</b>\n\n{bot.title}\nAttempt: {fails}/{MAX_RETRIES}\n"
+                        f"Next try in: {wait}s\nError: <code>{error}</code>")
+                else:
+                    await notify(
+                        f"🛑 <b>Gave Up</b>\n\n{bot.title}\nStill failing after {MAX_RETRIES} tries.\n"
+                        f"Error: <code>{error}</code>\n\nFix the problem, then press Restart in its settings (/mybots).")
 
 
 async def main():
@@ -104,7 +119,7 @@ async def main():
                 LOGGER.exception("Clone %s failed to start", bot_id)
                 await notify(
                     f"❌ <b>Clone Failed To Start</b>\n\n{escape(label(item))}\n"
-                    f"Error: <code>{escape(str(e))}</code>\n\nIt will be retried automatically.")
+                    f"Error: <code>{escape(str(e))}</code>\n\nThe watchdog will retry up to {MAX_RETRIES} times.")
 
         watch = asyncio.create_task(watchdog())
         await asyncio.Event().wait()
