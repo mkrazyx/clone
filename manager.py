@@ -27,8 +27,8 @@ PROMPTS = {
     "forcesub": ("ForceSub", "🔒", "Send the <b>force-sub channel ID</b>, or <code>0</code> to turn it off.\n"
                                     "<i>The bot must be an admin there.</i>"),
     "admins": ("Admins", "👮", "Send the <b>admin user IDs</b> separated by spaces."),
-    "shortener": ("Shortener", "🔗", "Send <code>site.com API</code>, or <code>off</code> to disable it."),
-    "database": ("Database", "🗄", "Send <code>MONGODB_URL DATABASE COLLECTION</code>\n"
+    "shortener": ("Shortener", "🔗", "Send <code>site.com API</code>"),
+    "database": ("Database", "🗄", "Send <code>MONGODB_URL DATABASE </code>\n"
                                   "or <code>default</code> to reset.\n\n<i>Your message is deleted afterwards.</i>"),
 }
 # Which saved settings each editable field covers (used to roll back a bad edit).
@@ -381,9 +381,9 @@ def apply_setting(bot_id, field, text):
         put(bot_id, admins=ids)
 
     elif field == "shortener":
-        parts = ["", ""] if text.lower() == "off" else text.split()
+        parts = text.split()
         if len(parts) != 2:
-            raise ValueError("Send: site.com API (or off)")
+            raise ValueError("Send: site.com API")
         put(bot_id, shortsite=re.sub(r"^https?://", "", parts[0]).rstrip("/"), shortapi=parts[1])
 
     else:  # database
