@@ -10,7 +10,7 @@ from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, User
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
 
-from config import ADMIN_USERNAME, FORCE_SUB_MESSAGE, LOGGER, MONGO_LIMIT_MB, START_MESSAGE
+from config import ADMIN_USERNAME, SEP, FORCE_SUB_MESSAGE, LOGGER, MONGO_LIMIT_MB, START_MESSAGE
 from database import (add_user, all_users, bot_storage, cluster_storage, del_user, put, user_count,
                       uses_default_cluster)
 
@@ -166,20 +166,20 @@ async def start(client, message):
         first, last = link_id(parts[1], channel), link_id(parts[-1], channel)
         ids = range(first, last + 1) if first <= last else range(first, last - 1, -1)
         if len(ids) > 100:
-            return await message.reply("This link contains too many files.")
+            return await message.reply("❌ This link contains too many files.")
     except Exception as e:
         LOGGER.warning("Invalid start link for bot %s: %s", client.bot_id, e)
-        return await message.reply("Invalid link.")
+        return await message.reply("❌ Invalid link.")
 
     key = (client.bot_id, user.id)
     if key in DELIVERING:
-        return await message.reply("Your previous files are still being sent. Please wait a moment.")
+        return await message.reply("⏳ Your previous files are still being sent. Please wait a moment.")
 
     try:
         messages = await get_messages(client, ids)
     except Exception:
         LOGGER.exception("Could not fetch files for bot %s", client.bot_id)
-        return await message.reply("Could not fetch the files right now. Please try again later.")
+        return await message.reply("⚠️ Could not fetch the files right now. Please try again later.")
 
     DELIVERING.add(key)
     spawn(send_files(client.bot_id, user.id, messages))
@@ -209,7 +209,7 @@ async def link_command(client, message):
         return
     batch = "batch" in message.command[0].lower()
     STATES[(client.bot_id, message.from_user.id)] = {"batch": batch, "first": None}
-    await message.reply("Forward first DB message or send its link." if batch else "Forward DB message or send its link.")
+    await message.reply("📨 Forward the <b>first</b> DB message or send its link." if batch else "📨 Forward the <b>DB message</b> or send its link.")
 
 
 async def link_input(client, message, state):
@@ -217,11 +217,11 @@ async def link_input(client, message, state):
     key = (client.bot_id, message.from_user.id)
     message_id = get_message_id(client, message)
     if not message_id:
-        return await message.reply("Invalid DB message. Forward a message from the FILES channel or send its link.")
+        return await message.reply("❌ Invalid DB message. Forward a message from the files channel or send its link.")
 
     if state["batch"] and state["first"] is None:
         state["first"] = message_id
-        return await message.reply("Forward last DB message or send its link.")
+        return await message.reply("📩 Forward the <b>last</b> DB message or send its link.")
 
     STATES.pop(key, None)
     ids = sorted((state["first"], message_id)) if state["batch"] else [message_id]
@@ -231,9 +231,9 @@ async def link_input(client, message, state):
     short = await get_shortlink(client, link)
 
     await message.reply(
-        f"<b>Link:</b> {link}\n\n<b>Slink:</b> {short}",
-        reply_markup=Markup([[Button("Share Link", url=share_url(link)),
-                              Button("Share Slink", url=share_url(short))]]))
+        f"🔗 <b>Link Generated</b>\n{SEP}\n\n📎 <b>Link:</b> {link}\n\n⚡ <b>Short Link:</b> {short}",
+        reply_markup=Markup([[Button("📤 Share Link", url=share_url(link)),
+                              Button("📤 Share Short Link", url=share_url(short))]]))
 
 
 async def admin_text(client, message):
@@ -256,9 +256,9 @@ async def admin_text(client, message):
     short = await get_shortlink(client, link)
 
     await message.reply_text(
-        f"<b>Original:-</b> {original}\n\n<b>Short Link:-</b> {short}",
+        f"⚡ <b>Short Link Ready</b>\n{SEP}\n\n📎 <b>Original:</b> {original}\n\n🔗 <b>Short:</b> {short}",
         quote=True,
-        reply_markup=Markup([[Button("Share Short Link", url=share_url(short))]]))
+        reply_markup=Markup([[Button("📤 Share Short Link", url=share_url(short))]]))
 
 
 # ═══════════════════════════ admins: shortener ═══════════════════════════
@@ -268,10 +268,11 @@ async def shortener_command(client, message):
         return
     cfg = client.cfg
     await message.reply(
-        f"<b>Current Shortener</b>\n\n"
-        f"Site: <code>{cfg['shortsite'] or 'Not set'}</code>\n"
-        f"API: <code>{cfg['shortapi'] or 'Not set'}</code>\n\n"
-        f"Change it with <code>/shortlink site.com API</code>")
+        f"🔗 <b>Shortener</b>\n{SEP}\n\n"
+        f"🌍 Site: <code>{cfg['shortsite'] or 'Not set'}</code>\n"
+        f"🔑 API: <code>{cfg['shortapi'] or 'Not set'}</code>\n\n"
+        f"💡 Change: <code>/shortlink site.com API</code>\n"
+        f"🚫 Disable: <code>/shortlink off</code>")
 
 
 async def shortlink_command(client, message):
@@ -284,11 +285,11 @@ async def shortlink_command(client, message):
     elif len(args) == 3:
         site, api = re.sub(r"^https?://", "", args[1]).rstrip("/"), args[2]
     else:
-        return await message.reply("Usage: <code>/shortlink site.com API</code>\nTo disable: <code>/shortlink off</code>")
+        return await message.reply("🔗 <b>Usage</b>\n<code>/shortlink site.com API</code>\n🚫 Disable: <code>/shortlink off</code>")
 
     await run(put, client.bot_id, shortsite=site, shortapi=api)
     client.cfg.update(shortsite=site, shortapi=api)
-    await message.reply(f"<b>Shortener Updated</b>\n\nSite: <code>{site or 'Off'}</code>\nAPI: <code>{api or 'Off'}</code>")
+    await message.reply(f"✅ <b>Shortener Updated</b>\n{SEP}\n\n🌍 Site: <code>{site or 'Off'}</code>\n🔑 API: <code>{api or 'Off'}</code>")
 
 
 # ═══════════════════════════ admins: broadcast and stats ═══════════════════════════
@@ -297,15 +298,15 @@ async def broadcast_command(client, message):
         return
     source = message.reply_to_message
     if not source:
-        return await message.reply("Reply to a message.")
+        return await message.reply("↩️ Reply to the message you want to broadcast.")
     if client.bot_id in BROADCASTS:
-        return await message.reply("A broadcast is already running.")
+        return await message.reply("⏳ A broadcast is already running.")
 
     state = BROADCASTS[client.bot_id] = {"cancel": False}  # claim the lock first
     try:
         users = await run(all_users, client.bot_id)
         status = await message.reply(
-            f"<b>Broadcasting...</b>\n\nTotal: <code>{len(users)}</code>\nSent: <code>0</code>",
+            f"📢 <b>Broadcasting…</b>\n{SEP}\n\n👥 Total: <code>{len(users)}</code>\n✅ Sent: <code>0</code>",
             reply_markup=CANCEL_BUTTON)
     except Exception:
         BROADCASTS.pop(client.bot_id, None)
@@ -318,10 +319,10 @@ async def run_broadcast(bot_id, source, status, users, state):
 
     def report(title):
         remaining = len(users) - sum(count.values())
-        return (f"<b>{title}</b>\n\nTotal: <code>{len(users)}</code>\n"
-                f"Sent: <code>{count['sent']}</code>\nBlocked: <code>{count['blocked']}</code>\n"
-                f"Deleted: <code>{count['deleted']}</code>\nFailed: <code>{count['failed']}</code>\n"
-                f"Remaining: <code>{remaining}</code>")
+        return (f"{title}\n{SEP}\n\n👥 Total: <code>{len(users)}</code>\n"
+                f"✅ Sent: <code>{count['sent']}</code>\n🚫 Blocked: <code>{count['blocked']}</code>\n"
+                f"👻 Deleted: <code>{count['deleted']}</code>\n❌ Failed: <code>{count['failed']}</code>\n"
+                f"⏳ Remaining: <code>{remaining}</code>")
 
     try:
         for number, user_id in enumerate(users, 1):
@@ -342,11 +343,11 @@ async def run_broadcast(bot_id, source, status, users, state):
 
             if number % 25 == 0:
                 try:
-                    await status.edit(report("Broadcasting..."), reply_markup=CANCEL_BUTTON)
+                    await status.edit(report("📢 <b>Broadcasting…</b>"), reply_markup=CANCEL_BUTTON)
                 except Exception:
                     pass
 
-        await status.edit(report("Broadcast Cancelled" if state["cancel"] else "Broadcast Completed"))
+        await status.edit(report("🛑 <b>Broadcast Cancelled</b>" if state["cancel"] else "✅ <b>Broadcast Completed</b>"))
     except Exception:
         LOGGER.exception("Broadcast crashed on bot %s", bot_id)
     finally:
@@ -355,10 +356,10 @@ async def run_broadcast(bot_id, source, status, users, state):
 
 async def cancel_broadcast(client, query):
     if not is_admin(client, query.from_user.id):
-        return await query.answer("Not authorized.", show_alert=True)
+        return await query.answer("🚫 Not authorized.", show_alert=True)
     if client.bot_id in BROADCASTS:
         BROADCASTS[client.bot_id]["cancel"] = True
-    await query.answer("Broadcast cancelled.")
+    await query.answer("🛑 Broadcast cancelled.")
 
 
 async def stats_command(client, message):
@@ -372,13 +373,13 @@ async def stats_command(client, message):
     def size(n):
         return f"{n / 1024 / 1024:.2f} MB" if n >= 1024 * 1024 else f"{n / 1024:.2f} KB"
 
-    text = f"<b>Bot Stats</b>\n\nUsers: <code>{users}</code>\n\nThis bot: <code>{size(mine)}</code>\n"
+    text = f"📊 <b>Bot Stats</b>\n{SEP}\n\n👥 Users: <code>{users}</code>\n\n💾 This bot: <code>{size(mine)}</code>\n"
     if shared:
-        text += (f"Other bots: <code>{size(max(0, total - mine))}</code>\n"
-                 f"MongoDB: <code>{size(total)} / {MONGO_LIMIT_MB} MB</code>\n"
-                 f"Left: <code>{size(max(0, limit - total))}</code>")
+        text += (f"🤖 Other bots: <code>{size(max(0, total - mine))}</code>\n"
+                 f"🗄 MongoDB: <code>{size(total)} / {MONGO_LIMIT_MB} MB</code>\n"
+                 f"🟢 Left: <code>{size(max(0, limit - total))}</code>")
     else:
-        text += "\nThis bot uses its own MongoDB, so the shared MongoDB limit does not apply."
+        text += "\n🗄 This bot uses its own MongoDB, so the shared limit does not apply."
     await message.reply(text)
 
 

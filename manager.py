@@ -9,7 +9,7 @@ from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
 
 from clone import register
-from config import API_HASH, APP_ID, BOTTOKEN, LOGGER, MONGODB, OWNER, WORKERS
+from config import SEP, API_HASH, APP_ID, BOTTOKEN, LOGGER, MONGODB, OWNER, WORKERS
 from database import (DEFAULT_COLLECTION, check_database, clone_id, clones, connect_location, default_database,
                       delete_clone, get_clone, get_clones, location, mask_url, put, save_clone, set_location,
                       settings, user_count)
@@ -23,34 +23,22 @@ TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$")
 
 # Settings the owner can edit from a clone's panel: key -> (button title, prompt)
 PROMPTS = {
-    "files": ("Files Channel",
-              "Send the new <b>files channel ID</b> (like <code>-100123456789</code>). "
-              "The bot must be an admin there."),
-    "forcesub": ("ForceSub",
-                 "Send the <b>force-sub channel ID</b>, or <code>0</code> to turn it off. "
-                 "The bot must be an admin there."),
-    "shortener": ("Shortener",
-                  "Send <code>site.com API</code>, or <code>off</code> to disable the shortener."),
-    "admins": ("Admins",
-               "Send the <b>admin user IDs</b> separated by spaces. They replace the current list."),
-    "database": ("Database",
-                 "Send where this clone keeps its data:\n"
-                 "<code>MONGODB_URL DATABASE COLLECTION</code>\n\n"
-                 "Example: <code>mongodb+srv://user:pass@cluster.mongodb.net/ clonex users</code>\n\n"
-                 "• The collection holds the users and is created if it does not exist.\n"
-                 "• Leave out the URL to keep the current one, or the collection to keep its name.\n"
-                 "• Send <code>default</code> to go back to the default MongoDB and a database named after the bot.\n"
-                 "• The clone's settings move with it. Existing users are not copied.\n\n"
-                 "Your message is deleted afterwards because it may contain a password."),
+    "files": ("Channel", "📁", "Send the new <b>files channel ID</b>.\n<i>The bot must be an admin there.</i>"),
+    "forcesub": ("ForceSub", "🔒", "Send the <b>force-sub channel ID</b>, or <code>0</code> to turn it off.\n"
+                                    "<i>The bot must be an admin there.</i>"),
+    "admins": ("Admins", "👮", "Send the <b>admin user IDs</b> separated by spaces."),
+    "shortener": ("Shortener", "🔗", "Send <code>site.com API</code>, or <code>off</code> to disable it."),
+    "database": ("Database", "🗄", "Send <code>MONGODB_URL DATABASE COLLECTION</code>\n"
+                                  "or <code>default</code> to reset.\n\n<i>Your message is deleted afterwards.</i>"),
 }
 # Which saved settings each editable field covers (used to roll back a bad edit).
 KEYS = {"files": ("files",), "forcesub": ("forcesub",), "admins": ("admins",),
         "shortener": ("shortsite", "shortapi")}
 # The delete confirmations: action -> (text, button label, next action)
 DELETE_STEPS = {
-    "del": ("<b>First confirmation</b>\n\nDelete this clone and permanently erase its users and settings from MongoDB?",
+    "del": (f"⚠️ <b>First Confirmation</b>\n{SEP}\n\nDelete this clone and permanently erase its users and settings from MongoDB?",
             "⚠️ Yes, Continue", "del2"),
-    "del2": ("<b>FINAL CONFIRMATION</b>\n\nThis cannot be undone. Permanently delete the clone, all its users, "
+    "del2": (f"🛑 <b>FINAL CONFIRMATION</b>\n{SEP}\n\nThis cannot be undone. Permanently delete the clone, all its users, "
              "and its settings?", "🛑 YES, DELETE PERMANENTLY", "del3"),
 }
 
@@ -176,7 +164,7 @@ async def get_me(token):
     async with aiohttp.ClientSession() as session, session.get(f"https://api.telegram.org/bot{token}/getMe") as response:
         data = await response.json()
     if not data.get("ok"):
-        raise RuntimeError(data.get("description", "Invalid bot token."))
+        raise RuntimeError(data.get("description", "❌ Invalid bot token."))
     return data["result"]
 
 
@@ -185,7 +173,7 @@ async def clone_list():
     """The list of clones as (text, buttons)."""
     docs = await run(get_clones)
     if not docs:
-        return ("🤖 <b>Clone Manager</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+        return (f"🤖 <b>Clone Manager</b>\n{SEP}\n\n"
                 "📭 <i>No clones yet.</i>\n\n"
                 "➕ Add one with <code>/clone BOT_TOKEN</code>"), None
     rows = []
@@ -193,7 +181,7 @@ async def clone_list():
         status = "🟢" if running(doc["_id"]) else "🔴"
         rows.append([Button(f"{status} {label(doc)}", callback_data=f"clone:{doc['_id']}")])
     online = sum(running(d["_id"]) for d in docs)
-    return (f"🤖 <b>Clone Manager</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+    return (f"🤖 <b>Clone Manager</b>\n{SEP}\n\n"
             f"📦 Clones: <code>{len(docs)}</code>   🟢 Online: <code>{online}</code>\n\n"
             f"👇 <i>Select a bot to manage it</i>"), Markup(rows)
 
@@ -203,41 +191,50 @@ def hide(token):
     return f"{token[:10]}…{token[-4:]}" if len(token) > 16 else "—"
 
 
-ICONS = {"files": "📁", "forcesub": "🔒", "shortener": "🔗", "admins": "👮", "database": "🗄"}
-
-
 async def panel(item):
     """The settings screen of one clone as (text, buttons)."""
     bot_id = item["_id"]
     cfg, users, (url, database, collection) = await asyncio.gather(
         run(settings, bot_id), run(user_count, bot_id), run(location, bot_id))
-    on = running(bot_id)
     if cfg["shortsite"] and cfg["shortapi"]:
         short = (f"✅\n├ 🌍 Site: <code>{escape(cfg['shortsite'])}</code>\n"
                  f"└ 🔑 API: <code>{escape(cfg['shortapi'])}</code>")
     else:
         short = "❌ <code>Off</code>"
     text = (
-        f"⚙️ <b>Clone Settings</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚙️ <b>Clone Settings</b>\n{SEP}\n\n"
         f"🤖 <b>{escape(label(item))}</b>\n"
-        f"{'🟢 <b>Running</b>' if on else '🔴 <b>Stopped</b>'}   •   👥 <code>{users}</code> users\n"
+        f"{'🟢 <b>Running</b>' if running(bot_id) else '🔴 <b>Stopped</b>'}  •  👥 <code>{users}</code> users\n"
         f"🔑 <code>{hide(item.get('token', ''))}</code>\n\n"
-        f"🗄 <b>Database</b>\n"
-        f"├ 🌐 Server: <code>{'Default' if url == MONGODB else escape(mask_url(url))}</code>\n"
-        f"├ 📂 Database: <code>{database}</code>\n"
-        f"└ 📄 Collection: <code>{collection}</code>\n\n"
-        f"📡 <b>Channels</b>\n"
-        f"├ 📁 Files: <code>{cfg['files']}</code>\n"
-        f"└ 🔒 ForceSub: <code>{cfg['forcesub'] or 'Off'}</code>\n\n"
-        f"🔗 <b>Shortener:</b> {short}\n\n"
-        f"👮 <b>Admins:</b> <code>{' '.join(map(str, cfg['admins'])) or 'None'}</code>")
+        f"🗄 <b>Database:</b> <code>{database}</code>\n"
+        f"📁 <b>Channel:</b> <code>{cfg['files']}</code>\n"
+        f"🔒 <b>ForceSub:</b> <code>{cfg['forcesub'] or 'Off'}</code>\n"
+        f"👮 <b>Admins:</b> <code>{' '.join(map(str, cfg['admins'])) or 'None'}</code>\n"
+        f"🔗 <b>Shortener:</b> {short}")
 
-    buttons = [Button(f"{ICONS[key]} {title}", callback_data=f"edit:{key}:{bot_id}") for key, (title, _) in PROMPTS.items()]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([Button("🔄 Restart", callback_data=f"restart:{bot_id}"),
-                 Button("🗑 Delete", callback_data=f"del:{bot_id}")])
-    rows.append([Button("⬅️ Back to Clones", callback_data="clones")])
+    def edit_button(key):
+        title, icon, _ = PROMPTS[key]
+        return Button(f"{icon} {title}", callback_data=f"edit:{key}:{bot_id}")
+
+    rows = [[edit_button(k) for k in ("files", "forcesub", "admins")],
+            [edit_button(k) for k in ("shortener", "database")],
+            [Button("🔄 Restart", callback_data=f"restart:{bot_id}"),
+             Button("🗑 Delete", callback_data=f"del:{bot_id}")],
+            [Button("⬅️ Back to Clones", callback_data="clones")]]
     return text, Markup(rows)
+
+
+def current(bot_id, field):
+    """The value of a setting as text, shown when the owner is about to change it."""
+    if field == "database":
+        url, database, collection = location(bot_id)
+        return f"{'Default' if url == MONGODB else mask_url(url)} {database} {collection}"
+    cfg = settings(bot_id)
+    if field == "shortener":
+        return f"{cfg['shortsite']} {cfg['shortapi']}" if cfg["shortsite"] else "Off"
+    if field == "admins":
+        return " ".join(map(str, cfg["admins"])) or "None"
+    return str(cfg[field] or "Off")
 
 
 # ═══════════════════════════ commands ═══════════════════════════
@@ -253,15 +250,15 @@ async def clone_command(client, message):
     args = message.text.split()
     if len(args) not in (2, 3):
         return await message.reply(
-            "Usage: <code>/clone BOT_TOKEN</code>\n\n"
-            "To adopt an existing database (keeps its users and settings):\n"
+            "➕ <b>Add a clone</b>\n<code>/clone BOT_TOKEN</code>\n\n"
+            "📂 <b>Use an existing database</b> (keeps its users and settings):\n"
             "<code>/clone BOT_TOKEN DATABASE_NAME</code>")
     token = args[1]
     adopt = args[2] if len(args) == 3 else None
     if not TOKEN_RE.fullmatch(token):
-        return await message.reply("Invalid bot token.")
+        return await message.reply("❌ Invalid bot token.")
     if token == BOTTOKEN:
-        return await message.reply("Manager bot cannot be cloned.")
+        return await message.reply("🚫 The manager bot cannot be cloned.")
 
     try:
         me = await get_me(token)
@@ -269,7 +266,7 @@ async def clone_command(client, message):
             raise RuntimeError("The bot must have a Telegram username.")
     except Exception as e:
         LOGGER.warning("Could not resolve bot token: %s", type(e).__name__)
-        return await message.reply(f"Could not start bot.\n<code>{escape(str(e))}</code>")
+        return await message.reply(f"❌ <b>Could not start bot</b>\n<code>{escape(str(e))}</code>")
 
     username = me["username"]
     bot_id = clone_id(username)  # also the name of the clone's database
@@ -296,13 +293,13 @@ async def clone_command(client, message):
         LOGGER.exception("Failed to create clone %s", bot_id)
         await run(clones.delete_one, {"_id": bot_id})  # leaves an adopted database untouched
         await worker.stop()
-        return await message.reply(f"Could not start bot.\n<code>{escape(str(e))}</code>")
+        return await message.reply(f"❌ <b>Could not start bot</b>\n<code>{escape(str(e))}</code>")
 
     workers[bot_id] = worker
     item = await run(get_clone, bot_id)
-    text = f"✅ Clone started: <b>{escape(name)}</b> (@{username})\nDatabase: <code>{item['database']}</code>"
+    text = f"✅ <b>Clone Started</b>\n{SEP}\n\n🤖 <b>{escape(name)}</b> (@{username})\n🗄 Database: <code>{item['database']}</code>"
     if adopted:
-        text += f"\nAdopted {adopted} users"
+        text += f"\n👥 Adopted <code>{adopted}</code> users"
     await message.reply(text)
     await notify(f"🤖 <b>Clone Started</b>\n\n{worker.title}")
 
@@ -311,7 +308,7 @@ async def update_token(message, bot_id, token, username, name, existing):
     """/clone for a bot that is already registered: switch it to the new token and start it again."""
     old = workers.get(bot_id)
     if old and existing["token"] == token and running(bot_id):
-        return await message.reply(f"@{username} is already registered and running.")
+        return await message.reply(f"ℹ️ @{username} is already registered and running.")
 
     if old:
         await old.stop()
@@ -324,10 +321,10 @@ async def update_token(message, bot_id, token, username, name, existing):
     except Exception as e:
         LOGGER.exception("Clone %s did not start with its new token", bot_id)
         return await message.reply(
-            f"The new token was saved, but the bot could not start.\n<code>{escape(str(e))}</code>\n\n"
+            f"⚠️ <b>Token saved, but the bot could not start.</b>\n<code>{escape(str(e))}</code>\n\n"
             "It will be retried automatically.")
 
-    await message.reply(f"✅ Token updated, clone started: <b>{escape(name)}</b> (@{username})")
+    await message.reply(f"✅ <b>Token Updated</b>\n{SEP}\n\n🤖 <b>{escape(name)}</b> (@{username}) is running")
     await notify(f"🔄 <b>Clone Token Updated</b>\n\n{worker.title}")
 
 
@@ -335,35 +332,35 @@ async def restart_command(client, message):
     """/restart BOT_ID"""
     args = message.text.split(maxsplit=1)
     if len(args) != 2:
-        return await message.reply("Usage: /restart BOT_ID")
+        return await message.reply("🔄 Usage: <code>/restart BOT_ID</code>")
     bot_id = args[1].strip().lower()
     worker = workers.get(bot_id)
     if not worker:
-        return await message.reply("Clone is not running.")
+        return await message.reply("⚠️ Clone is not running.")
     try:
         await worker.restart()
-        await message.reply(f"✅ Clone <code>{bot_id}</code> restarted.")
+        await message.reply(f"🔄 Clone <code>{bot_id}</code> restarted.")
     except Exception as e:
         LOGGER.exception("Failed to restart clone %s", bot_id)
-        await message.reply(f"Restart failed.\n<code>{escape(str(e))}</code>")
+        await message.reply(f"❌ <b>Restart failed</b>\n<code>{escape(str(e))}</code>")
 
 
 async def delete_command(client, message):
     """/deletebot BOT_ID, then /deletebot BOT_ID confirm, then the buttons."""
     args = message.text.split(maxsplit=2)
     if len(args) == 2:
-        return await message.reply(f"First confirmation required:\n<code>/deletebot {args[1]} confirm</code>")
+        return await message.reply(f"⚠️ <b>First confirmation required:</b>\n<code>/deletebot {args[1]} confirm</code>")
     if len(args) != 3 or args[2].lower() != "confirm":
-        return await message.reply("Use the exact confirmation shown above.")
+        return await message.reply("❌ Use the exact confirmation shown above.")
 
     bot_id = args[1].strip().lower()
     if not await run(get_clone, bot_id):
-        return await message.reply("Clone not found.")
+        return await message.reply("❌ Clone not found.")
     await message.reply(
-        "<b>Second confirmation required.</b>\n\n"
+        "🛑 <b>Second confirmation required</b>\n\n"
         "This permanently deletes the clone and its MongoDB database.\n\nUse the button below to continue.",
         reply_markup=Markup([[Button("⚠️ Permanently Delete", callback_data=f"del2:{bot_id}")],
-                             [Button("Cancel", callback_data=f"clone:{bot_id}")]]))
+                             [Button("🔙", callback_data=f"clone:{bot_id}")]]))
 
 
 # ═══════════════════════════ editing settings ═══════════════════════════
@@ -448,12 +445,12 @@ async def edit_input(client, message):
             except Exception:
                 LOGGER.exception("Rollback failed for %s", bot_id)
         return await message.reply(
-            f"❌ {escape(str(e))}\n\nSend a new value, or cancel.",
-            reply_markup=Markup([[Button("Cancel", callback_data=f"clone:{bot_id}")]]))
+            f"❌ {escape(str(e))}\n\n🔁 Send a new value, or press 🔙.",
+            reply_markup=Markup([[Button("🔙", callback_data=f"clone:{bot_id}")]]))
 
     pending.pop(user_id, None)
     panel_text, buttons = await panel(await run(get_clone, bot_id))
-    await message.reply(f"✅ {PROMPTS[field][0]} updated.\n\n{panel_text}", reply_markup=buttons)
+    await message.reply(f"✅ <b>{PROMPTS[field][0]} updated.</b>\n\n{panel_text}", reply_markup=buttons)
 
 
 # ═══════════════════════════ buttons ═══════════════════════════
@@ -473,8 +470,8 @@ async def callbacks(client, query):
 
         item = await run(get_clone, bot_id)
         if not item:
-            return await query.answer("Clone not found.", show_alert=True)
-        cancel = Markup([[Button("Cancel", callback_data=f"clone:{bot_id}")]])
+            return await query.answer("❌ Clone not found.", show_alert=True)
+        cancel = Markup([[Button("🔙", callback_data=f"clone:{bot_id}")]])
 
         if action == "clone":
             text, buttons = await panel(item)
@@ -482,26 +479,28 @@ async def callbacks(client, query):
 
         elif action == "edit":
             pending[user_id] = (bot_id, field)
-            title, prompt = PROMPTS[field]
-            await edit(f"<b>{escape(label(item))}</b> — {title}\n\n{prompt}", reply_markup=cancel)
+            title, icon, prompt = PROMPTS[field]
+            now = await run(current, bot_id, field)
+            await edit(f"{icon} <b>{title}</b>\n{SEP}\n\n🤖 {escape(label(item))}\n\n"
+                       f"📌 <b>Current:</b>\n<code>{escape(now)}</code>\n\n{prompt}", reply_markup=cancel)
 
         elif action == "restart":
             if not workers.get(bot_id):
-                return await query.answer("Clone is not running.", show_alert=True)
+                return await query.answer("⚠️ Clone is not running.", show_alert=True)
             await workers[bot_id].restart()
             return await query.answer("Clone restarted.")
 
         elif action in DELETE_STEPS:
             text, button, next_action = DELETE_STEPS[action]
             await edit(text, reply_markup=Markup([[Button(button, callback_data=f"{next_action}:{bot_id}")],
-                                                  [Button("Cancel", callback_data=f"clone:{bot_id}")]]))
+                                                  [Button("🔙", callback_data=f"clone:{bot_id}")]]))
 
         elif action == "del3":
             worker = workers.pop(bot_id, None)
             if worker:
                 await worker.stop()
             await run(delete_clone, bot_id)
-            await edit("<b>Clone deleted.</b>\n\nIts bot entry and MongoDB database were permanently removed.",
+            await edit("🗑 <b>Clone Deleted</b>\n\nIts bot entry and MongoDB database were permanently removed.",
                        reply_markup=Markup([[Button("⬅️ Bot Clones", callback_data="clones")]]))
             return await query.answer("Deleted")
 

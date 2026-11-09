@@ -39,4 +39,6 @@ You need to join our channel to use this bot.</b>"""
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
+SEP = "━" * 13  # divider line under the titles
+
 LOGGER = logging.getLogger("clonebot")
