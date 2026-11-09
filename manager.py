@@ -185,12 +185,25 @@ async def clone_list():
     """The list of clones as (text, buttons)."""
     docs = await run(get_clones)
     if not docs:
-        return "<b>No clones yet.</b>\n\nAdd one with <code>/clone BOT_TOKEN</code>", None
+        return ("🤖 <b>Clone Manager</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+                "📭 <i>No clones yet.</i>\n\n"
+                "➕ Add one with <code>/clone BOT_TOKEN</code>"), None
     rows = []
     for doc in docs:
         status = "🟢" if running(doc["_id"]) else "🔴"
         rows.append([Button(f"{status} {label(doc)}", callback_data=f"clone:{doc['_id']}")])
-    return "<b>Bot Clones</b>", Markup(rows)
+    online = sum(running(d["_id"]) for d in docs)
+    return (f"🤖 <b>Clone Manager</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 Clones: <code>{len(docs)}</code>   🟢 Online: <code>{online}</code>\n\n"
+            f"👇 <i>Select a bot to manage it</i>"), Markup(rows)
+
+
+def hide(token):
+    """Show only the ends of a token, so the panel never exposes it in full."""
+    return f"{token[:10]}…{token[-4:]}" if len(token) > 16 else "—"
+
+
+ICONS = {"files": "📁", "forcesub": "🔒", "shortener": "🔗", "admins": "👮", "database": "🗄"}
 
 
 async def panel(item):
@@ -198,25 +211,32 @@ async def panel(item):
     bot_id = item["_id"]
     cfg, users, (url, database, collection) = await asyncio.gather(
         run(settings, bot_id), run(user_count, bot_id), run(location, bot_id))
+    on = running(bot_id)
+    if cfg["shortsite"] and cfg["shortapi"]:
+        short = (f"✅\n├ 🌍 Site: <code>{escape(cfg['shortsite'])}</code>\n"
+                 f"└ 🔑 API: <code>{escape(cfg['shortapi'])}</code>")
+    else:
+        short = "❌ <code>Off</code>"
     text = (
-        f"<b>Clone Settings</b>\n\n"
-        f"Bot: <b>{escape(label(item))}</b>\n"
-        f"Status: {'🟢 Running' if running(bot_id) else '🔴 Stopped'}\n"
-        f"Users: <code>{users}</code>\n"
-        f"Token: <code>{item.get('token', '')}</code>\n\n"
-        f"MongoDB: <code>{'Default' if url == MONGODB else escape(mask_url(url))}</code>\n"
-        f"Database: <code>{database}</code>\n"
-        f"Collection: <code>{collection}</code>\n\n"
-        f"Files Channel: <code>{cfg['files']}</code>\n"
-        f"ForceSub: <code>{cfg['forcesub'] or 'Off'}</code>\n"
-        f"Shortener: <code>{cfg['shortsite'] or 'Off'}</code> / <code>{cfg['shortapi'] or 'Not set'}</code>\n"
-        f"Admins: <code>{' '.join(map(str, cfg['admins'])) or 'None'}</code>")
+        f"⚙️ <b>Clone Settings</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"🤖 <b>{escape(label(item))}</b>\n"
+        f"{'🟢 <b>Running</b>' if on else '🔴 <b>Stopped</b>'}   •   👥 <code>{users}</code> users\n"
+        f"🔑 <code>{hide(item.get('token', ''))}</code>\n\n"
+        f"🗄 <b>Database</b>\n"
+        f"├ 🌐 Server: <code>{'Default' if url == MONGODB else escape(mask_url(url))}</code>\n"
+        f"├ 📂 Database: <code>{database}</code>\n"
+        f"└ 📄 Collection: <code>{collection}</code>\n\n"
+        f"📡 <b>Channels</b>\n"
+        f"├ 📁 Files: <code>{cfg['files']}</code>\n"
+        f"└ 🔒 ForceSub: <code>{cfg['forcesub'] or 'Off'}</code>\n\n"
+        f"🔗 <b>Shortener:</b> {short}\n\n"
+        f"👮 <b>Admins:</b> <code>{' '.join(map(str, cfg['admins'])) or 'None'}</code>")
 
-    edit_buttons = [Button(f"✏️ {title}", callback_data=f"edit:{key}:{bot_id}") for key, (title, _) in PROMPTS.items()]
-    rows = [edit_buttons[i:i + 2] for i in range(0, len(edit_buttons), 2)]
+    buttons = [Button(f"{ICONS[key]} {title}", callback_data=f"edit:{key}:{bot_id}") for key, (title, _) in PROMPTS.items()]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([Button("🔄 Restart", callback_data=f"restart:{bot_id}"),
                  Button("🗑 Delete", callback_data=f"del:{bot_id}")])
-    rows.append([Button("⬅️ Back", callback_data="clones")])
+    rows.append([Button("⬅️ Back to Clones", callback_data="clones")])
     return text, Markup(rows)
 
 
