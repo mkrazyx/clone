@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import re
-from urllib.parse import quote
 
 import aiohttp
 from pyrogram import filters
@@ -42,10 +41,6 @@ def spawn(coro):
     task = asyncio.create_task(coro)
     TASKS.add(task)
     task.add_done_callback(TASKS.discard)
-
-
-def share_url(link):
-    return f"https://telegram.me/share/url?url={quote(link, safe='')}"
 
 
 def link_id(raw, channel):
@@ -231,9 +226,8 @@ async def link_input(client, message, state):
     short = await get_shortlink(client, link)
 
     await message.reply(
-        f"🔗 <b>Link Generated</b>\n{SEP}\n\n📎 <b>Link:</b> {link}\n\n⚡ <b>Short Link:</b> {short}",
-        reply_markup=Markup([[Button("📤 Share Link", url=share_url(link)),
-                              Button("📤 Share Short Link", url=share_url(short))]]))
+        f"🔗 <b>Link Generated</b>\n{SEP}\n\n📎 <b>Link:</b> {link}\n\n⚡ <b>Short Link:</b> <code>{short}</code>",
+        disable_web_page_preview=True)
 
 
 async def admin_text(client, message):
@@ -256,9 +250,8 @@ async def admin_text(client, message):
     short = await get_shortlink(client, link)
 
     await message.reply_text(
-        f"⚡ <b>Short Link Ready</b>\n{SEP}\n\n📎 <b>Original:</b> {original}\n\n🔗 <b>Short:</b> {short}",
-        quote=True,
-        reply_markup=Markup([[Button("📤 Share Short Link", url=share_url(short))]]))
+        f"⚡ <b>Short Link Ready</b>\n{SEP}\n\n📎 <b>Original:</b> {original}\n\n🔗 <b>Short:</b> <code>{short}</code>",
+        quote=True, disable_web_page_preview=True)
 
 
 # ═══════════════════════════ admins: shortener ═══════════════════════════
@@ -271,21 +264,17 @@ async def shortener_command(client, message):
         f"🔗 <b>Shortener</b>\n{SEP}\n\n"
         f"🌍 Site: <code>{cfg['shortsite'] or 'Not set'}</code>\n"
         f"🔑 API: <code>{cfg['shortapi'] or 'Not set'}</code>\n\n"
-        f"💡 Change: <code>/shortlink site.com API</code>\n"
-        f"🚫 Disable: <code>/shortlink off</code>")
+        f"💡 Change: <code>/shortlink site.com API</code>")
 
 
 async def shortlink_command(client, message):
-    """/shortlink site.com API changes the shortener, /shortlink off disables it."""
+    """/shortlink site.com API changes the shortener."""
     if not message.from_user or not is_admin(client, message.from_user.id):
         return
     args = message.text.split()
-    if len(args) == 2 and args[1].lower() == "off":
-        site = api = ""
-    elif len(args) == 3:
-        site, api = re.sub(r"^https?://", "", args[1]).rstrip("/"), args[2]
-    else:
-        return await message.reply("🔗 <b>Usage</b>\n<code>/shortlink site.com API</code>\n🚫 Disable: <code>/shortlink off</code>")
+    if len(args) != 3:
+        return await message.reply("🔗 <b>Usage</b>\n<code>/shortlink site.com API</code>")
+    site, api = re.sub(r"^https?://", "", args[1]).rstrip("/"), args[2]
 
     await run(put, client.bot_id, shortsite=site, shortapi=api)
     client.cfg.update(shortsite=site, shortapi=api)
